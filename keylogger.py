@@ -1,7 +1,3 @@
-# keylogger.py
-# Create an Advanced Keylogger in Python - Crash Course notes
-# Author: Grant Collins
-
 # Libraries
 
 from email.mime.multipart import MIMEMultipart
